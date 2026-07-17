@@ -22,32 +22,29 @@ enum HeadlessRender {
         }
         // Keep the raw input next to the output for comparison.
         let rawPath = (outputPath as NSString).deletingPathExtension + "-raw.png"
-        _ = writePNG(fake, to: rawPath)
-        renderAndWrite(image: fake, outputPath: outputPath)
+        _ = ImageWriter.write(fake, to: rawPath)
+
+        // Showcase settings: exercise the cursor overlay too.
+        var settings = BeautifySettings()
+        settings.cursor = .arrow
+        settings.cursorPosition = CGPoint(x: 0.66, y: 0.52)
+        settings.cursorSize = 110
+        renderAndWrite(image: fake, outputPath: outputPath, settings: settings)
     }
 
-    private static func renderAndWrite(image: CGImage, outputPath: String) {
-        let settings = BeautifySettings()
+    private static func renderAndWrite(
+        image: CGImage,
+        outputPath: String,
+        settings: BeautifySettings = BeautifySettings()
+    ) {
         let autoColors = ColorAnalysis.autoGradient(for: image)
         guard let output = BeautifyRenderer.render(image: image, settings: settings, autoColors: autoColors),
-              writePNG(output, to: outputPath)
+              ImageWriter.write(output, to: outputPath)
         else {
             fputs("snipost: render failed\n", stderr)
             exit(1)
         }
         print("wrote \(outputPath) (\(output.width)x\(output.height))")
-    }
-
-    static func writePNG(_ image: CGImage, to path: String) -> Bool {
-        let url = URL(fileURLWithPath: path)
-        guard let destination = CGImageDestinationCreateWithURL(
-            url as CFURL,
-            UTType.png.identifier as CFString,
-            1,
-            nil
-        ) else { return false }
-        CGImageDestinationAddImage(destination, image, nil)
-        return CGImageDestinationFinalize(destination)
     }
 
     /// Draws a plausible dark-themed app window so the auto-gradient and

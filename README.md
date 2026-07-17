@@ -30,15 +30,25 @@ open dist/Snipost.app
 
 ## Use it
 
-| Action | Hotkey | Also in menu bar |
+| Action | Hotkey (remappable in Settings) | Also in menu bar |
 |---|---|---|
 | Capture area | ⌥⇧S | ✓ |
 | Capture window | ⌥⇧W | ✓ |
 | Capture full screen | ⌥⇧F | ✓ |
+| Snip to clipboard (plain, no editing) | ⌥⇧C | ✓ |
 
-After a capture, the editor opens with the beautified result. Tweak background /
-padding / corner radius / shadow / canvas aspect (16:9, 1:1, 4:5, 4:3), then
-**Copy (⌘C)**, **Save to Desktop**, or **Save… (⌘S)**.
+After a capture, the editor opens with the beautified result. Tweak:
+
+- **Background** — auto gradient from the screenshot's colors, 10 presets, your Mac's
+  system wallpapers, custom solid color / two-color gradient pickers, any image file,
+  or transparent
+- **Effect** — Vivid, Warm, Cool, Mono, Pixel, Matrix, Comic
+- **Cursor** — overlay a macOS cursor (arrow, hand, I-beam, crosshair); click the
+  preview to place it, slider to resize
+- **Padding / corner radius / shadow** and canvas aspect (16:9, 1:1, 4:5, 4:3)
+- **Format** — export as PNG, JPEG, or HEIC
+
+then **Copy (⌘C)**, **Save to Desktop**, or **Save… (⌘S)**.
 
 ## Headless render check (no UI)
 
@@ -68,8 +78,10 @@ Sources/Snipost/
 
 - [x] Menu bar app, global hotkeys, area/window/screen capture
 - [x] Auto-beautify: edge-color gradient, auto-grow padding, radius, shadow
-- [x] Aspect presets, gradient gallery, transparent export
+- [x] Aspect presets, gradient gallery, image backgrounds, transparent export
 - [x] Copy / Save / headless render mode
+- [x] Screen Recording permission prompt on first launch
+- [x] macOS cursor overlay (vector, click-to-place), image filters, PNG/JPEG/HEIC
 - [ ] Floating post-capture thumbnail (skip editor for the 3-second flow)
 - [ ] Google Drive sync (`drive.file` OAuth) with instant share link
 - [ ] Social posting: pre-sized exports + web intents, then Bluesky/Mastodon APIs

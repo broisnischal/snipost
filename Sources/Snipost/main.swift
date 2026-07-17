@@ -25,7 +25,9 @@ if arguments.count >= 2 {
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.run() // never returns; `delegate` stays alive in this scope
+}

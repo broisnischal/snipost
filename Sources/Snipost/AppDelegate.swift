@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let hotkeys = HotkeyManager()
@@ -9,6 +10,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
+        // Trigger the system Screen Recording prompt once so the app registers
+        // itself in Privacy & Security. Asking on every launch would nag users
+        // whose permission state macOS reports lazily.
+        let requestedKey = "didRequestScreenAccess"
+        if !CGPreflightScreenCaptureAccess(), !UserDefaults.standard.bool(forKey: requestedKey) {
+            UserDefaults.standard.set(true, forKey: requestedKey)
+            CGRequestScreenCaptureAccess()
+        }
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
             button.image = NSImage(
@@ -16,37 +26,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 accessibilityDescription: "Snipost"
             )
         }
-        statusItem.menu = buildMenu()
 
-        let optShift = UInt32(optionKey | shiftKey)
-        hotkeys.register(keyCode: UInt32(kVK_ANSI_S), modifiers: optShift) { [weak self] in
-            self?.capture(.area)
+        reloadHotkeysAndMenu()
+
+        NotificationCenter.default.addObserver(
+            forName: .snipostHotkeysChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reloadHotkeysAndMenu() }
         }
-        hotkeys.register(keyCode: UInt32(kVK_ANSI_W), modifiers: optShift) { [weak self] in
-            self?.capture(.window)
+    }
+
+    private func reloadHotkeysAndMenu() {
+        hotkeys.unregisterAll()
+        for action in HotkeyAction.allCases {
+            let hotkey = Preferences.shared.hotkey(for: action)
+            hotkeys.register(keyCode: hotkey.keyCode, modifiers: hotkey.carbonModifiers) { [weak self] in
+                self?.perform(action)
+            }
         }
-        hotkeys.register(keyCode: UInt32(kVK_ANSI_F), modifiers: optShift) { [weak self] in
-            self?.capture(.screen)
-        }
+        statusItem.menu = buildMenu()
     }
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
 
-        let area = NSMenuItem(title: "Capture Area", action: #selector(captureArea), keyEquivalent: "s")
-        area.keyEquivalentModifierMask = [.option, .shift]
-        area.target = self
-        menu.addItem(area)
+        addCaptureItem(to: menu, title: "Capture Area", hotkeyAction: .area, action: #selector(captureArea))
+        addCaptureItem(to: menu, title: "Capture Window", hotkeyAction: .window, action: #selector(captureWindow))
+        addCaptureItem(to: menu, title: "Capture Full Screen", hotkeyAction: .screen, action: #selector(captureScreen))
+        addCaptureItem(to: menu, title: "Snip to Clipboard", hotkeyAction: .plainArea, action: #selector(plainSnip))
 
-        let window = NSMenuItem(title: "Capture Window", action: #selector(captureWindow), keyEquivalent: "w")
-        window.keyEquivalentModifierMask = [.option, .shift]
-        window.target = self
-        menu.addItem(window)
+        menu.addItem(.separator())
 
-        let screen = NSMenuItem(title: "Capture Full Screen", action: #selector(captureScreen), keyEquivalent: "f")
-        screen.keyEquivalentModifierMask = [.option, .shift]
-        screen.target = self
-        menu.addItem(screen)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
 
         menu.addItem(.separator())
 
@@ -56,14 +71,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
-    @objc private func captureArea() { capture(.area) }
-    @objc private func captureWindow() { capture(.window) }
-    @objc private func captureScreen() { capture(.screen) }
+    private func addCaptureItem(to menu: NSMenu, title: String, hotkeyAction: HotkeyAction, action: Selector) {
+        let hotkey = Preferences.shared.hotkey(for: hotkeyAction)
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: hotkey.menuKeyEquivalent)
+        item.keyEquivalentModifierMask = hotkey.nsModifiers
+        item.target = self
+        menu.addItem(item)
+    }
 
-    private func capture(_ kind: CaptureKind) {
-        CaptureService.capture(kind) { [weak self] image in
+    @objc private func captureArea() { perform(.area) }
+    @objc private func captureWindow() { perform(.window) }
+    @objc private func captureScreen() { perform(.screen) }
+    @objc private func plainSnip() { perform(.plainArea) }
+    @objc private func openSettings() { SettingsWindowController.shared.show() }
+
+    private func perform(_ action: HotkeyAction) {
+        CaptureService.capture(action.captureKind) { [weak self] image in
             guard let self, let image else { return }
-            self.openEditor(with: image)
+            if action == .plainArea {
+                // Plain snip: the raw screenshot, straight to the clipboard.
+                Clipboard.copy(image)
+                Toast.show("Copied to clipboard")
+            } else {
+                self.handleCaptured(image)
+            }
+        }
+    }
+
+    private func handleCaptured(_ image: CGImage) {
+        let prefs = Preferences.shared
+        if prefs.openEditorAfterCapture {
+            openEditor(with: image)
+            if prefs.autoCopy {
+                autoProcess(image, copy: true, save: false)
+            }
+        } else {
+            // Instant mode: never drop a capture on the floor — copy even if
+            // both toggles are off unless the user opted into save-only.
+            let copy = prefs.autoCopy || !prefs.autoSaveToDesktop
+            autoProcess(image, copy: copy, save: prefs.autoSaveToDesktop)
+        }
+    }
+
+    /// Beautifies with default settings and copies/saves without the editor.
+    private func autoProcess(_ image: CGImage, copy: Bool, save: Bool) {
+        let settings = BeautifySettings()
+        let autoColors = ColorAnalysis.autoGradient(for: image)
+        guard let rendered = BeautifyRenderer.render(image: image, settings: settings, autoColors: autoColors) else {
+            return
+        }
+
+        var notes: [String] = []
+        if copy {
+            Clipboard.copy(rendered)
+            notes.append("Copied to clipboard")
+        }
+        if save {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+            let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+                ?? FileManager.default.homeDirectoryForCurrentUser
+            let url = desktop.appendingPathComponent("Snipost \(formatter.string(from: Date())).png")
+            if ImageWriter.write(rendered, to: url.path) {
+                notes.append("Saved to Desktop")
+            }
+        }
+        if !notes.isEmpty {
+            Toast.show(notes.joined(separator: " · "))
         }
     }
 

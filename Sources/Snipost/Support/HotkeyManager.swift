@@ -3,6 +3,7 @@ import Foundation
 
 /// Global hotkeys via the Carbon RegisterEventHotKey API — small, dependency-free,
 /// and still the standard mechanism for menu bar utilities.
+@MainActor
 final class HotkeyManager {
     typealias Handler = () -> Void
 
@@ -31,7 +32,10 @@ final class HotkeyManager {
                     &hotKeyID
                 )
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-                manager.handlers[hotKeyID.id]?()
+                // Carbon delivers hotkey events on the main thread.
+                MainActor.assumeIsolated {
+                    manager.handlers[hotKeyID.id]?()
+                }
                 return noErr
             },
             1,
@@ -39,6 +43,14 @@ final class HotkeyManager {
             Unmanaged.passUnretained(self).toOpaque(),
             &eventHandler
         )
+    }
+
+    func unregisterAll() {
+        for ref in hotKeyRefs {
+            if let ref { UnregisterEventHotKey(ref) }
+        }
+        hotKeyRefs.removeAll()
+        handlers.removeAll()
     }
 
     func register(keyCode: UInt32, modifiers: UInt32, handler: @escaping Handler) {
