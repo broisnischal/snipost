@@ -12,6 +12,8 @@ enum HotkeyAction: String, CaseIterable {
     case window
     case screen
     case plainArea
+    case scrolling
+    case ocrArea
 
     var title: String {
         switch self {
@@ -19,11 +21,30 @@ enum HotkeyAction: String, CaseIterable {
         case .window: return "Capture window"
         case .screen: return "Capture full screen"
         case .plainArea: return "Snip to clipboard (plain)"
+        case .scrolling: return "Scrolling capture"
+        case .ocrArea: return "OCR snip (copy text)"
         }
     }
 
     var captureKind: CaptureKind {
-        self == .plainArea ? .area : CaptureKind(rawValue: rawValue)!
+        CaptureKind(rawValue: rawValue) ?? .area
+    }
+}
+
+/// What happens right after a capture.
+enum CaptureFlow: String, CaseIterable, Identifiable {
+    case editor
+    case thumbnail
+    case instant
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .editor: return "Open editor"
+        case .thumbnail: return "Floating thumbnail"
+        case .instant: return "Instant (no UI)"
+        }
     }
 }
 
@@ -33,15 +54,33 @@ final class Preferences: ObservableObject {
     static let shared = Preferences()
     private let defaults = UserDefaults.standard
 
-    /// Off = instant mode: beautify with defaults and copy/save immediately.
-    @Published var openEditorAfterCapture: Bool {
-        didSet { defaults.set(openEditorAfterCapture, forKey: "openEditorAfterCapture") }
+    @Published var captureFlow: CaptureFlow {
+        didSet { defaults.set(captureFlow.rawValue, forKey: "captureFlow") }
     }
     @Published var autoCopy: Bool {
         didSet { defaults.set(autoCopy, forKey: "autoCopy") }
     }
     @Published var autoSaveToDesktop: Bool {
         didSet { defaults.set(autoSaveToDesktop, forKey: "autoSaveToDesktop") }
+    }
+    @Published var saveHistory: Bool {
+        didSet { defaults.set(saveHistory, forKey: "saveHistory") }
+    }
+    @Published var autoUploadToDrive: Bool {
+        didSet { defaults.set(autoUploadToDrive, forKey: "autoUploadToDrive") }
+    }
+    @Published var notifyOnDriveUpload: Bool {
+        didSet { defaults.set(notifyOnDriveUpload, forKey: "notifyOnDriveUpload") }
+    }
+
+    /// First time Drive gets connected, turn sync + notifications on so
+    /// "everything I snip lands in Drive" just works out of the box.
+    func enableDriveSyncDefaultsOnce() {
+        guard !defaults.bool(forKey: "didDefaultAutoUpload") else { return }
+        defaults.set(true, forKey: "didDefaultAutoUpload")
+        autoUploadToDrive = true
+        notifyOnDriveUpload = true
+        Notifier.requestPermissionIfNeeded()
     }
     @Published private(set) var hotkeys: [HotkeyAction: Hotkey] = [:]
 
@@ -50,12 +89,23 @@ final class Preferences: ObservableObject {
         .window: Hotkey(keyCode: UInt32(kVK_ANSI_W), carbonModifiers: UInt32(optionKey | shiftKey)),
         .screen: Hotkey(keyCode: UInt32(kVK_ANSI_F), carbonModifiers: UInt32(optionKey | shiftKey)),
         .plainArea: Hotkey(keyCode: UInt32(kVK_ANSI_C), carbonModifiers: UInt32(optionKey | shiftKey)),
+        .scrolling: Hotkey(keyCode: UInt32(kVK_ANSI_R), carbonModifiers: UInt32(optionKey | shiftKey)),
+        .ocrArea: Hotkey(keyCode: UInt32(kVK_ANSI_O), carbonModifiers: UInt32(optionKey | shiftKey)),
     ]
 
     private init() {
-        openEditorAfterCapture = defaults.object(forKey: "openEditorAfterCapture") as? Bool ?? true
+        if let raw = defaults.string(forKey: "captureFlow"), let flow = CaptureFlow(rawValue: raw) {
+            captureFlow = flow
+        } else if defaults.object(forKey: "openEditorAfterCapture") as? Bool == false {
+            captureFlow = .instant // migrate the old toggle
+        } else {
+            captureFlow = .editor
+        }
         autoCopy = defaults.object(forKey: "autoCopy") as? Bool ?? true
         autoSaveToDesktop = defaults.object(forKey: "autoSaveToDesktop") as? Bool ?? false
+        saveHistory = defaults.object(forKey: "saveHistory") as? Bool ?? true
+        autoUploadToDrive = defaults.object(forKey: "autoUploadToDrive") as? Bool ?? false
+        notifyOnDriveUpload = defaults.object(forKey: "notifyOnDriveUpload") as? Bool ?? true
 
         var loaded: [HotkeyAction: Hotkey] = [:]
         for action in HotkeyAction.allCases {
