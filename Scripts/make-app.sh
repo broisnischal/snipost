@@ -13,6 +13,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Snipost "$APP/Contents/MacOS/Snipost"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# Embedded Google OAuth client (developer-created, gitignored) — with it in
+# place, users only ever see the "Connect Google Drive" button.
+[ -f Resources/DriveClient.plist ] && cp Resources/DriveClient.plist "$APP/Contents/Resources/DriveClient.plist"
 
 # Prefer a real signing identity: it stays stable across rebuilds, so macOS
 # keeps the Screen Recording permission. Ad-hoc (-) changes every build and
