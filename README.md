@@ -36,6 +36,8 @@ open dist/Snipost.app
 | Capture window | ⌥⇧W | ✓ |
 | Capture full screen | ⌥⇧F | ✓ |
 | Snip to clipboard (plain, no editing) | ⌥⇧C | ✓ |
+| Scrolling capture (auto-scroll + stitch) | ⌥⇧R | ✓ |
+| OCR snip (recognized text → clipboard) | ⌥⇧O | ✓ |
 
 After a capture, the editor opens with the beautified result. Tweak:
 
@@ -81,10 +83,12 @@ Sources/Snipost/
 - [x] Aspect presets, gradient gallery, image backgrounds, transparent export
 - [x] Copy / Save / headless render mode
 - [x] Screen Recording permission prompt on first launch
-- [x] macOS cursor overlay (vector, click-to-place), image filters, PNG/JPEG/HEIC
-- [ ] Floating post-capture thumbnail (skip editor for the 3-second flow)
-- [ ] Google Drive sync (`drive.file` OAuth) with instant share link
-- [ ] Social posting: pre-sized exports + web intents, then Bluesky/Mastodon APIs
-- [ ] Annotations: arrow, box, text, blur/redact
-- [ ] ScreenCaptureKit capture backend, scrolling capture, OCR
-- [ ] History library, hotkey customization, Sparkle updates, notarized DMG
+- [x] macOS cursor overlay (vector, drag-to-place), image filters, PNG/JPEG/HEIC
+- [x] Floating post-capture thumbnail (Settings → After capture → Floating thumbnail)
+- [x] Google Drive sync (`drive.file` OAuth + PKCE) with instant share link
+- [x] Social posting: web intents (X/Threads/LinkedIn) + Bluesky & Mastodon APIs
+- [x] Annotations: arrow, box, text, blur/redact with colors and undo
+- [x] ScreenCaptureKit capture backend, OCR copy-text (Vision)
+- [x] History library (menu bar → History…), hotkey customization
+- [x] Scrolling capture (⌥⇧R — auto-scrolls and stitches; needs Accessibility permission)
+- [ ] Sparkle updates + notarized DMG (needs a Developer ID certificate)
