@@ -18,7 +18,7 @@ final class SelectionOverlayController {
 
     private static var current: SelectionOverlayController?
 
-    private let window: NSWindow
+    private let window: OverlayWindow
     private let completion: @MainActor (Result) -> Void
 
     static func begin(
@@ -48,9 +48,11 @@ final class SelectionOverlayController {
         self.completion = completion
 
         let view = SelectionView(mode: mode, frozen: frozen, windows: windows, screen: screen)
+        // Non-activating panel: taking key status without activating the app
+        // keeps other apps' open menus/popovers alive so they can be snipped.
         window = OverlayWindow(
             contentRect: screen.frame,
-            styleMask: .borderless,
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -63,7 +65,7 @@ final class SelectionOverlayController {
         window.contentView = view
         view.onFinish = { [weak self] result in self?.finish(result) }
 
-        NSApp.activate(ignoringOtherApps: true)
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
     }
@@ -75,11 +77,11 @@ final class SelectionOverlayController {
     }
 }
 
-/// Borderless windows refuse key status by default, which would silently
+/// Borderless panels refuse key status by default, which would silently
 /// swallow the Esc key — opt back in so keyboard events reach the view.
-private final class OverlayWindow: NSWindow {
+private final class OverlayWindow: NSPanel {
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 
 private final class SelectionView: NSView {
