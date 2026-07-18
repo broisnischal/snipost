@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
+import Vision
 
 /// CLI entry points so the render pipeline can be exercised (and eyeballed)
 /// without any UI — used for development and CI.
@@ -30,6 +31,127 @@ enum HeadlessRender {
         settings.cursorPosition = CGPoint(x: 0.66, y: 0.52)
         settings.cursorSize = 110
         renderAndWrite(image: fake, outputPath: outputPath, settings: settings)
+    }
+
+    /// Renders known text into an image and OCRs it back — verifies the
+    /// Vision pipeline without any UI.
+    static func ocrTest() {
+        let expected = "Snipost turns screenshots into posts 12345"
+        guard let image = makeTextImage(text: expected, width: 1100, height: 160) else {
+            fputs("snipost: failed to draw text image\n", stderr)
+            exit(1)
+        }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        let handler = VNImageRequestHandler(cgImage: image)
+        try? handler.perform([request])
+        let recognized = (request.results ?? [])
+            .compactMap { $0.topCandidates(1).first?.string }
+            .joined(separator: "\n")
+        print("recognized: \(recognized)")
+        print(recognized.contains("Snipost") && recognized.contains("12345") ? "OCR TEST PASSED" : "OCR TEST FAILED")
+    }
+
+    private static func makeTextImage(text: String, width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 40, weight: .medium),
+            .foregroundColor: NSColor.black,
+        ]
+        let string = NSAttributedString(string: text, attributes: attributes)
+        let nsContext = NSGraphicsContext(cgContext: ctx, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = nsContext
+        string.draw(at: NSPoint(x: 30, y: 55))
+        NSGraphicsContext.restoreGraphicsState()
+        return ctx.makeImage()
+    }
+
+    /// Simulates a scrolling capture: slice a tall synthetic page into
+    /// overlapping viewport frames, then stitch them back together.
+    static func stitchTest(outputPath: String) {
+        let width = 700
+        let tallHeight = 2400
+        let viewportHeight = 600
+        let step = 340
+
+        guard let tall = makeTallContent(width: width, height: tallHeight) else {
+            fputs("snipost: failed to draw tall content\n", stderr)
+            exit(1)
+        }
+
+        var frames: [CGImage] = []
+        var offset = 0
+        while offset + viewportHeight <= tallHeight {
+            if let frame = tall.cropping(to: CGRect(x: 0, y: offset, width: width, height: viewportHeight)) {
+                frames.append(frame)
+            }
+            offset += step
+        }
+
+        var segments = [frames[0]]
+        var previous = frames[0]
+        var allCorrect = true
+        for frame in frames.dropFirst() {
+            let detected = Stitcher.newRowsCount(previous: previous, next: frame)
+            print("detected scroll offset: \(detected) (expected \(step))")
+            if detected != step { allCorrect = false }
+            if detected > 0,
+               let slice = frame.cropping(to: CGRect(x: 0, y: frame.height - detected, width: frame.width, height: detected)) {
+                segments.append(slice)
+            }
+            previous = frame
+        }
+
+        guard let stitched = Stitcher.stack(segments) else {
+            fputs("snipost: stack failed\n", stderr)
+            exit(1)
+        }
+        let expectedHeight = viewportHeight + (frames.count - 1) * step
+        print("stitched \(stitched.width)x\(stitched.height), expected \(width)x\(expectedHeight)")
+        _ = ImageWriter.write(stitched, to: outputPath)
+        print(allCorrect && stitched.height == expectedHeight ? "STITCH TEST PASSED" : "STITCH TEST FAILED")
+    }
+
+    private static func makeTallContent(width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        let w = CGFloat(width)
+        let h = CGFloat(height)
+        ctx.setFillColor(CGColor(red: 0.97, green: 0.97, blue: 0.98, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+
+        // Deterministic pseudo-random content rows so every row is distinctive.
+        var y: CGFloat = 20
+        var index = 0
+        while y < h - 40 {
+            let hue = CGFloat((index * 37) % 100) / 100
+            let color = NSColor(hue: hue, saturation: 0.55, brightness: 0.8, alpha: 1)
+            let indent = CGFloat((index * 53) % 180)
+            let rowWidth = w * (0.35 + CGFloat((index * 29) % 50) / 100)
+            let rect = CGRect(x: 24 + indent, y: y, width: min(rowWidth, w - 48 - indent), height: 18)
+            let path = CGPath(roundedRect: rect, cornerWidth: 9, cornerHeight: 9, transform: nil)
+            ctx.setFillColor(color.cgColor)
+            ctx.addPath(path)
+            ctx.fillPath()
+            y += 34
+            index += 1
+        }
+        return ctx.makeImage()
     }
 
     private static func renderAndWrite(
