@@ -127,14 +127,15 @@ enum BeautifyRenderer {
             drawGradient(colors: preset.colors, in: context, size: size)
 
         case .solid(let color):
-            drawGradient(colors: [color, color], in: context, size: size)
+            // A solid must stay flat — no glow, or black turns into a gradient.
+            drawGradient(colors: [color, color], in: context, size: size, glow: false)
 
         case .customGradient(let start, let end):
             drawGradient(colors: [start, end], in: context, size: size)
         }
     }
 
-    private static func drawGradient(colors: [RGB], in context: CGContext, size: CGSize) {
+    private static func drawGradient(colors: [RGB], in context: CGContext, size: CGSize, glow: Bool = true) {
         let cgColors = colors.map { CGColor(red: $0.r, green: $0.g, blue: $0.b, alpha: 1) }
         guard cgColors.count >= 2 else {
             if let first = cgColors.first {
@@ -159,6 +160,7 @@ enum BeautifyRenderer {
         )
 
         // Soft radial glow near the top — the "presentation ready" studio look.
+        guard glow else { return }
         if let highlight = CGGradient(
             colorsSpace: CGColorSpaceCreateDeviceRGB(),
             colors: [

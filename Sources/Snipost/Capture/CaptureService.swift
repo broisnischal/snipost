@@ -20,13 +20,24 @@ enum CaptureService {
                     return
                 }
 
+                let includeCursor = Preferences.shared.includeCursor
+
                 switch kind {
                 case .screen:
                     try await Task.sleep(nanoseconds: 250_000_000) // let the menu close
-                    completion(try await captureDisplay(target.display, showsCursor: true))
+                    completion(try await captureDisplay(target.display, showsCursor: includeCursor))
 
                 case .area:
-                    let frozen = try await captureDisplay(target.display, showsCursor: false)
+                    // Prefer a frame the hotkey tap froze before dismissing an
+                    // open menu — that's how menus end up in the snip.
+                    let frozen: CGImage
+                    if let pending = PendingFrozenFrame.consume(displayID: target.display.displayID) {
+                        frozen = pending
+                    } else {
+                        // Let our own menu finish closing before freezing.
+                        try await Task.sleep(nanoseconds: 200_000_000)
+                        frozen = try await captureDisplay(target.display, showsCursor: includeCursor)
+                    }
                     let viewSize = target.screen.frame.size
                     SelectionOverlayController.begin(
                         mode: .area,
@@ -42,7 +53,8 @@ enum CaptureService {
                     }
 
                 case .window:
-                    let frozen = try await captureDisplay(target.display, showsCursor: false)
+                    try await Task.sleep(nanoseconds: 200_000_000)
+                    let frozen = try await captureDisplay(target.display, showsCursor: includeCursor)
                     let viewSize = target.screen.frame.size
                     let pickable = pickableWindows(in: content, display: target.display)
                     SelectionOverlayController.begin(
@@ -78,7 +90,7 @@ enum CaptureService {
     // MARK: Display / window selection
 
     @MainActor
-    private static func targetDisplay(in content: SCShareableContent) -> (display: SCDisplay, screen: NSScreen)? {
+    static func targetDisplay(in content: SCShareableContent) -> (display: SCDisplay, screen: NSScreen)? {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
             ?? NSScreen.main
@@ -114,7 +126,21 @@ enum CaptureService {
 
     // MARK: ScreenCaptureKit captures
 
-    private static func captureDisplay(_ display: SCDisplay, showsCursor: Bool) async throws -> CGImage {
+    struct CaptureUnavailable: Error {}
+
+    /// Used by the hotkey tap (off the main thread) to freeze the display —
+    /// including any open menu and the live cursor — before menus get dismissed.
+    static func freezeDisplayUnderMouse(showsCursor: Bool) async throws -> (image: CGImage, displayID: CGDirectDisplayID) {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let mouse = CGEvent(source: nil)?.location ?? .zero
+        guard let display = content.displays.first(where: { $0.frame.contains(mouse) }) ?? content.displays.first else {
+            throw CaptureUnavailable()
+        }
+        let image = try await captureDisplay(display, showsCursor: showsCursor)
+        return (image, display.displayID)
+    }
+
+    static func captureDisplay(_ display: SCDisplay, showsCursor: Bool) async throws -> CGImage {
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let config = SCStreamConfiguration()
         let scale = CGFloat(filter.pointPixelScale)
@@ -143,7 +169,7 @@ enum CaptureService {
     }
 
     /// Maps a selection in overlay-view points back to pixels of the frozen capture.
-    private static func crop(_ image: CGImage, viewRect: CGRect, viewSize: CGSize) -> CGImage? {
+    static func crop(_ image: CGImage, viewRect: CGRect, viewSize: CGSize) -> CGImage? {
         let sx = CGFloat(image.width) / viewSize.width
         let sy = CGFloat(image.height) / viewSize.height
         let pixelRect = CGRect(
