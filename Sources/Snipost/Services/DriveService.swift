@@ -51,6 +51,7 @@ final class DriveService: ObservableObject {
             do {
                 try await self.runOAuthFlow()
                 self.isConnected = true
+                Preferences.shared.enableDriveSyncDefaultsOnce()
             } catch {
                 self.lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
