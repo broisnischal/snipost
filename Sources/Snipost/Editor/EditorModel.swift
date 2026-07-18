@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import Vision
 
 @MainActor
 final class EditorModel: ObservableObject {
@@ -11,6 +12,7 @@ final class EditorModel: ObservableObject {
         didSet {
             if oldValue.filter != settings.filter {
                 filteredSource = ImageFilters.apply(settings.filter, to: source)
+                rebuildComposition()
             }
             renderPreview()
         }
@@ -18,6 +20,14 @@ final class EditorModel: ObservableObject {
     @Published var preview: NSImage?
     @Published var justCopied = false
     @Published var lastSaveMessage: String?
+
+    // Annotations
+    @Published var tool: AnnotationTool = .move
+    @Published var annotations: [Annotation] = [] {
+        didSet { rebuildComposition(); renderPreview() }
+    }
+    @Published var annotationColorIndex = 0
+    private var draft: Annotation?
 
     // Custom background colors
     @Published var customSolid: Color = Color(red: 0.35, green: 0.45, blue: 0.85)
@@ -30,11 +40,13 @@ final class EditorModel: ObservableObject {
     @Published private(set) var selectedWallpaper: URL?
 
     private(set) var filteredSource: CGImage
+    private(set) var composedSource: CGImage
     private(set) var backgroundImage: CGImage?
 
     init(source: CGImage) {
         self.source = source
         self.filteredSource = source
+        self.composedSource = source
         self.autoColors = ColorAnalysis.autoGradient(for: source)
         renderPreview()
         loadWallpapers()
@@ -57,9 +69,15 @@ final class EditorModel: ObservableObject {
         return CGSize(width: cw.rounded(), height: ch.rounded())
     }
 
+    private func rebuildComposition() {
+        var all = annotations
+        if let draft { all.append(draft) }
+        composedSource = AnnotationRenderer.compose(filteredSource, annotations: all)
+    }
+
     private func renderPreview() {
         guard let rendered = BeautifyRenderer.render(
-            image: filteredSource,
+            image: composedSource,
             settings: settings,
             autoColors: autoColors,
             backgroundImage: backgroundImage,
@@ -70,14 +88,104 @@ final class EditorModel: ObservableObject {
 
     func renderFull() -> CGImage? {
         BeautifyRenderer.render(
-            image: filteredSource,
+            image: composedSource,
             settings: settings,
             autoColors: autoColors,
             backgroundImage: backgroundImage
         )
     }
 
-    // MARK: Cursor placement
+    // MARK: Preview interaction (cursor placement or annotation drawing)
+
+    func dragChanged(atNormalized point: CGPoint) {
+        switch tool {
+        case .move:
+            placeCursor(atNormalized: point)
+        case .arrow, .box, .blur:
+            let imagePoint = imagePoint(fromCanvasNormalized: point)
+            if draft == nil {
+                draft = Annotation(tool: tool, start: imagePoint, end: imagePoint, color: currentColor)
+            } else {
+                draft?.end = imagePoint
+            }
+            rebuildComposition()
+            renderPreview()
+        case .text:
+            break // placed on release
+        }
+    }
+
+    func dragEnded(atNormalized point: CGPoint) {
+        switch tool {
+        case .move:
+            break
+        case .arrow, .box, .blur:
+            if var finished = draft {
+                finished.end = imagePoint(fromCanvasNormalized: point)
+                draft = nil
+                let span = hypot(finished.end.x - finished.start.x, finished.end.y - finished.start.y)
+                if span > 6 {
+                    annotations.append(finished)
+                } else {
+                    rebuildComposition()
+                    renderPreview()
+                }
+            }
+        case .text:
+            let imagePoint = imagePoint(fromCanvasNormalized: point)
+            annotations.append(Annotation(
+                tool: .text,
+                start: imagePoint,
+                end: imagePoint,
+                text: "Text",
+                color: currentColor
+            ))
+        }
+    }
+
+    var currentColor: RGB {
+        Annotation.palette[min(annotationColorIndex, Annotation.palette.count - 1)]
+    }
+
+    func undoAnnotation() {
+        guard !annotations.isEmpty else { return }
+        annotations.removeLast()
+    }
+
+    func clearAnnotations() {
+        annotations.removeAll()
+    }
+
+    /// Binding to the most recent text annotation, for inline editing.
+    var lastTextBinding: Binding<String>? {
+        guard let index = annotations.lastIndex(where: { $0.tool == .text }) else { return nil }
+        return Binding(
+            get: { [weak self] in self?.annotations[index].text ?? "" },
+            set: { [weak self] newValue in
+                guard let self, self.annotations.indices.contains(index) else { return }
+                self.annotations[index].text = newValue
+            }
+        )
+    }
+
+    /// Maps a normalized canvas point (y from top) into source-image pixels,
+    /// mirroring the renderer's layout math.
+    private func imagePoint(fromCanvasNormalized p: CGPoint) -> CGPoint {
+        let iw = CGFloat(source.width)
+        let ih = CGFloat(source.height)
+        let padding = settings.paddingFraction * max(iw, ih)
+        var cw = iw + padding * 2
+        var ch = ih + padding * 2
+        if let ratio = settings.aspect.ratio {
+            if cw / ch < ratio { cw = ch * ratio } else { ch = cw / ratio }
+        }
+        let originX = (cw - iw) / 2
+        let originY = (ch - ih) / 2
+        return CGPoint(
+            x: min(max(p.x * cw - originX, 0), iw),
+            y: min(max(p.y * ch - originY, 0), ih)
+        )
+    }
 
     /// Called with a click/drag location normalized over the preview (y from the top).
     func placeCursor(atNormalized point: CGPoint) {
@@ -156,7 +264,7 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    // MARK: Export
+    // MARK: Export & share
 
     func copyToClipboard() {
         guard let full = renderFull() else { return }
@@ -192,10 +300,56 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    private func flashSaveMessage(_ message: String) {
+    func uploadToDrive() {
+        guard DriveService.shared.isConnected else {
+            flashSaveMessage("Connect Google Drive in Settings → Accounts")
+            SettingsWindowController.shared.show()
+            return
+        }
+        guard let full = renderFull() else { return }
+        flashSaveMessage("Uploading to Drive…")
+        let filename = defaultFilename()
+        Task { @MainActor in
+            do {
+                let link = try await DriveService.shared.uploadAndLink(full, filename: filename)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(link, forType: .string)
+                flashSaveMessage("Drive link copied")
+                if Preferences.shared.notifyOnDriveUpload {
+                    Notifier.notify(title: "Uploaded to Google Drive", body: "Share link copied — \(filename)")
+                }
+            } catch {
+                let reason = (error as? LocalizedError)?.errorDescription ?? "Drive upload failed"
+                flashSaveMessage(reason)
+                if Preferences.shared.notifyOnDriveUpload {
+                    Notifier.notify(title: "Drive upload failed", body: reason)
+                }
+            }
+        }
+    }
+
+    /// OCR via Vision: recognized text from the original capture → clipboard.
+    func copyRecognizedText() {
+        let image = source
+        flashSaveMessage("Recognizing text…")
+        Task { @MainActor in
+            let text = await TextRecognizer.recognize(in: image)
+            if text.isEmpty {
+                flashSaveMessage("No text found")
+            } else {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                flashSaveMessage("Text copied (\(text.count) chars)")
+            }
+        }
+    }
+
+    func flashSaveMessage(_ message: String) {
         lastSaveMessage = message
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.lastSaveMessage = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            if self?.lastSaveMessage == message {
+                self?.lastSaveMessage = nil
+            }
         }
     }
 
