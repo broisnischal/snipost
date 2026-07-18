@@ -67,14 +67,40 @@ enum ShareError: LocalizedError {
 }
 
 enum ShareService {
-    /// Copies the image and opens the platform's web composer — the image is
-    /// on the clipboard, ready to paste into the post.
+    /// Copies the image, opens the platform's web composer, and — when
+    /// Accessibility is granted — auto-pastes so the image actually attaches.
+    /// (Web intents carry text only; there is no URL parameter for images.)
     @MainActor
     static func openWebIntent(_ intent: WebIntent, caption: String, image: CGImage) {
         Clipboard.copy(image)
         guard let url = intent.composeURL(text: caption) else { return }
         NSWorkspace.shared.open(url)
-        Toast.show("Image copied — click the composer and press ⌘V to attach")
+
+        if AXIsProcessTrusted() {
+            Toast.show("Opening \(intent.rawValue) — attaching the image…")
+            Task { @MainActor in
+                // Give the browser time to load and focus the composer.
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                postPasteKeystroke()
+                Toast.show("Image attached — review and post (⌘V if it's missing)")
+            }
+        } else {
+            Toast.show("Image copied — click the composer and press ⌘V to attach")
+        }
+    }
+
+    /// Synthetic ⌘V into the frontmost app (the browser's compose box).
+    @MainActor
+    private static func postPasteKeystroke() {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let vKey = CGKeyCode(9) // kVK_ANSI_V
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false)
+        else { return }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 
     // MARK: Bluesky (AT Protocol)
