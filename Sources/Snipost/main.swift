@@ -12,6 +12,12 @@ if arguments.count >= 2 {
     case "--selftest" where arguments.count == 3:
         HeadlessRender.selftest(outputPath: arguments[2])
         exit(0)
+    case "--stitchtest" where arguments.count == 3:
+        HeadlessRender.stitchTest(outputPath: arguments[2])
+        exit(0)
+    case "--ocrtest":
+        HeadlessRender.ocrTest()
+        exit(0)
     case "--help", "-h":
         print("""
         Snipost — minimal screenshot beautifier for macOS
