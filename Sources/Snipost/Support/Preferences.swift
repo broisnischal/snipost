@@ -66,6 +66,11 @@ final class Preferences: ObservableObject {
     @Published var saveHistory: Bool {
         didSet { defaults.set(saveHistory, forKey: "saveHistory") }
     }
+    /// Burn the real system cursor (live position and shape — hand, I-beam…)
+    /// into captures.
+    @Published var includeCursor: Bool {
+        didSet { defaults.set(includeCursor, forKey: "includeCursor") }
+    }
     @Published var autoUploadToDrive: Bool {
         didSet { defaults.set(autoUploadToDrive, forKey: "autoUploadToDrive") }
     }
@@ -104,6 +109,7 @@ final class Preferences: ObservableObject {
         autoCopy = defaults.object(forKey: "autoCopy") as? Bool ?? true
         autoSaveToDesktop = defaults.object(forKey: "autoSaveToDesktop") as? Bool ?? false
         saveHistory = defaults.object(forKey: "saveHistory") as? Bool ?? true
+        includeCursor = defaults.object(forKey: "includeCursor") as? Bool ?? true
         autoUploadToDrive = defaults.object(forKey: "autoUploadToDrive") as? Bool ?? false
         notifyOnDriveUpload = defaults.object(forKey: "notifyOnDriveUpload") as? Bool ?? true
 
