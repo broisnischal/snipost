@@ -29,6 +29,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         reloadHotkeysAndMenu()
 
+        // Users who connected Drive before auto-sync existed get it enabled
+        // once too.
+        if DriveService.shared.isConnected {
+            Preferences.shared.enableDriveSyncDefaultsOnce()
+        }
+
         NotificationCenter.default.addObserver(
             forName: .snipostHotkeysChanged,
             object: nil,
@@ -56,8 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addCaptureItem(to: menu, title: "Capture Window", hotkeyAction: .window, action: #selector(captureWindow))
         addCaptureItem(to: menu, title: "Capture Full Screen", hotkeyAction: .screen, action: #selector(captureScreen))
         addCaptureItem(to: menu, title: "Snip to Clipboard", hotkeyAction: .plainArea, action: #selector(plainSnip))
+        addCaptureItem(to: menu, title: "Scrolling Capture", hotkeyAction: .scrolling, action: #selector(scrollingCapture))
+        addCaptureItem(to: menu, title: "OCR Snip", hotkeyAction: .ocrArea, action: #selector(ocrSnip))
 
         menu.addItem(.separator())
+
+        let history = NSMenuItem(title: "History…", action: #selector(openHistory), keyEquivalent: "")
+        history.target = self
+        menu.addItem(history)
 
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
@@ -83,60 +95,183 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func captureWindow() { perform(.window) }
     @objc private func captureScreen() { perform(.screen) }
     @objc private func plainSnip() { perform(.plainArea) }
+    @objc private func scrollingCapture() { perform(.scrolling) }
+    @objc private func ocrSnip() { perform(.ocrArea) }
     @objc private func openSettings() { SettingsWindowController.shared.show() }
 
+    @objc private func openHistory() {
+        HistoryWindowController.show { [weak self] url in
+            guard let self, let image = CaptureService.loadCGImage(at: url) else { return }
+            self.openEditor(with: image)
+        }
+    }
+
     private func perform(_ action: HotkeyAction) {
+        if action == .scrolling {
+            CaptureService.captureScrolling { [weak self] image in
+                guard let self, let image else { return }
+                self.handleCaptured(image)
+            }
+            return
+        }
         CaptureService.capture(action.captureKind) { [weak self] image in
             guard let self, let image else { return }
-            if action == .plainArea {
-                // Plain snip: the raw screenshot, straight to the clipboard.
+            switch action {
+            case .plainArea:
+                // Plain snip: the raw screenshot, straight to the clipboard —
+                // but it still counts as a capture for history and Drive sync.
                 Clipboard.copy(image)
                 Toast.show("Copied to clipboard")
-            } else {
+                if Preferences.shared.saveHistory {
+                    HistoryStore.save(image)
+                }
+                if Preferences.shared.autoUploadToDrive, DriveService.shared.isConnected {
+                    self.autoUploadQuietly(image)
+                }
+            case .ocrArea:
+                self.recognizeAndCopyText(from: image)
+            default:
                 self.handleCaptured(image)
+            }
+        }
+    }
+
+    /// OCR snip: recognized text straight to the clipboard, no editor.
+    private func recognizeAndCopyText(from image: CGImage) {
+        Task { @MainActor in
+            let text = await TextRecognizer.recognize(in: image)
+            if text.isEmpty {
+                Toast.show("No text found")
+            } else {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(42)
+                Toast.show("Text copied — “\(preview)\(text.count > 42 ? "…" : "")”")
             }
         }
     }
 
     private func handleCaptured(_ image: CGImage) {
         let prefs = Preferences.shared
-        if prefs.openEditorAfterCapture {
+        if prefs.saveHistory {
+            HistoryStore.save(image)
+        }
+        if prefs.autoUploadToDrive, DriveService.shared.isConnected,
+           let rendered = defaultRender(image) {
+            autoUploadQuietly(rendered)
+        }
+
+        switch prefs.captureFlow {
+        case .editor:
             openEditor(with: image)
-            if prefs.autoCopy {
-                autoProcess(image, copy: true, save: false)
+            if prefs.autoCopy || prefs.autoSaveToDesktop {
+                autoProcess(image, copy: prefs.autoCopy, save: prefs.autoSaveToDesktop, toast: false)
             }
-        } else {
-            // Instant mode: never drop a capture on the floor — copy even if
-            // both toggles are off unless the user opted into save-only.
+
+        case .thumbnail:
+            guard let rendered = defaultRender(image) else { return }
+            if prefs.autoCopy { Clipboard.copy(rendered) }
+            if prefs.autoSaveToDesktop { saveToDesktop(rendered) }
+            FloatingThumbnail.show(rendered: rendered, actions: FloatingThumbnail.Actions(
+                onEdit: { [weak self] in self?.openEditor(with: image) },
+                onCopy: { Clipboard.copy(rendered); Toast.show("Copied to clipboard") },
+                onSave: { [weak self] in
+                    self?.saveToDesktop(rendered)
+                    Toast.show("Saved to Desktop")
+                },
+                onDrive: { [weak self] in self?.uploadToDrive(rendered) }
+            ))
+
+        case .instant:
+            // Never drop a capture on the floor — copy even if both toggles
+            // are off unless the user opted into save-only.
             let copy = prefs.autoCopy || !prefs.autoSaveToDesktop
-            autoProcess(image, copy: copy, save: prefs.autoSaveToDesktop)
+            autoProcess(image, copy: copy, save: prefs.autoSaveToDesktop, toast: true)
+        }
+    }
+
+    private func defaultRender(_ image: CGImage) -> CGImage? {
+        BeautifyRenderer.render(
+            image: image,
+            settings: BeautifySettings(),
+            autoColors: ColorAnalysis.autoGradient(for: image)
+        )
+    }
+
+    private func saveToDesktop(_ rendered: CGImage) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        let url = desktop.appendingPathComponent("Snipost \(formatter.string(from: Date())).png")
+        _ = ImageWriter.write(rendered, to: url.path)
+    }
+
+    /// Background sync for the "upload every capture" preference — no
+    /// clipboard changes; confirmation via toast + optional notification.
+    private func autoUploadQuietly(_ rendered: CGImage) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let filename = "Snipost \(formatter.string(from: Date())).png"
+        Task { @MainActor in
+            do {
+                _ = try await DriveService.shared.uploadAndLink(rendered, filename: filename)
+                Toast.show("Synced to Drive")
+                if Preferences.shared.notifyOnDriveUpload {
+                    Notifier.notify(title: "Uploaded to Google Drive", body: filename)
+                }
+            } catch {
+                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                Toast.show("Drive sync failed")
+                if Preferences.shared.notifyOnDriveUpload {
+                    Notifier.notify(title: "Drive sync failed", body: reason)
+                }
+            }
+        }
+    }
+
+    private func uploadToDrive(_ rendered: CGImage) {
+        guard DriveService.shared.isConnected else {
+            Toast.show("Connect Google Drive in Settings → Accounts")
+            SettingsWindowController.shared.show()
+            return
+        }
+        Toast.show("Uploading to Drive…")
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let filename = "Snipost \(formatter.string(from: Date())).png"
+        Task { @MainActor in
+            do {
+                let link = try await DriveService.shared.uploadAndLink(rendered, filename: filename)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(link, forType: .string)
+                Toast.show("Drive link copied")
+                if Preferences.shared.notifyOnDriveUpload {
+                    Notifier.notify(title: "Uploaded to Google Drive", body: "Share link copied — \(filename)")
+                }
+            } catch {
+                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                Toast.show("Drive upload failed")
+                if Preferences.shared.notifyOnDriveUpload {
+                    Notifier.notify(title: "Drive upload failed", body: reason)
+                }
+            }
         }
     }
 
     /// Beautifies with default settings and copies/saves without the editor.
-    private func autoProcess(_ image: CGImage, copy: Bool, save: Bool) {
-        let settings = BeautifySettings()
-        let autoColors = ColorAnalysis.autoGradient(for: image)
-        guard let rendered = BeautifyRenderer.render(image: image, settings: settings, autoColors: autoColors) else {
-            return
-        }
-
+    private func autoProcess(_ image: CGImage, copy: Bool, save: Bool, toast: Bool) {
+        guard let rendered = defaultRender(image) else { return }
         var notes: [String] = []
         if copy {
             Clipboard.copy(rendered)
             notes.append("Copied to clipboard")
         }
         if save {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-            let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
-                ?? FileManager.default.homeDirectoryForCurrentUser
-            let url = desktop.appendingPathComponent("Snipost \(formatter.string(from: Date())).png")
-            if ImageWriter.write(rendered, to: url.path) {
-                notes.append("Saved to Desktop")
-            }
+            saveToDesktop(rendered)
+            notes.append("Saved to Desktop")
         }
-        if !notes.isEmpty {
+        if toast, !notes.isEmpty {
             Toast.show(notes.joined(separator: " · "))
         }
     }
